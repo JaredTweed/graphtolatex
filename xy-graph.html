@@ -1,0 +1,1156 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Interactive Graph Editor</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px 20px 0 20px;
+      font-family: Arial, sans-serif;
+    }
+
+    #controls {
+      margin-bottom: 20px;
+    }
+
+    input {
+      width: 60px;
+      margin-right: 10px;
+    }
+
+    canvas {
+      border: 1px solid #ccc;
+      cursor: crosshair;
+    }
+
+    .instructions {
+      position: relative;
+      margin: 20px 0 0 0;
+      font-size: 14px;
+      color: #666;
+    }
+
+    .instructions * {
+      margin: 2px 0 0 0;
+    }
+
+    #color-labels {
+      position: absolute;
+      text-align: right;
+      top: 20px;
+      right: 20px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="controls">
+    X Max: <input type="number" id="xMax" value="10" step="1">
+    Y Max: <input type="number" id="yMax" value="43" step="1"><br>
+    X Min: <input type="number" id="xMin" value="-3" step="1">
+    Y Min: <input type="number" id="yMin" value="-3" step="1">
+    <label for="penColor">Pen Color:</label>
+    <select id="penColor">
+      <option value="black" selected>Black</option>
+      <option value="red">Red</option>
+      <option value="blue">Blue</option>
+      <option value="green">Green</option>
+      <option value="orange">Orange</option>
+      <!-- <option value="purple">Purple</option> -->
+      <!-- <option value="olive">Olive</option> -->
+    </select>
+
+  </div>
+  <canvas id="graph" width="800" height="600"></canvas>
+  <div class="instructions">
+    <p>Controls:</p>
+    <ul>
+      <li>Click to add point</li>
+      <li>Click and drag to create line (press Shift to curve it, Alt to make a bracket)</li>
+      <li>Right click on endpoint to add arrow</li>
+      <!-- <li>Ctrl+Z to undo</li> -->
+      <li>Ctrl+X toggle dotted line</li>
+      <li>Ctrl+C to export tikz</li>
+      <li>Ctrl+Click to delete line/point/label</li>
+      <li>Alt+Click to add/edit a label (on a line, point, or selected color)</li>
+      <!-- <li>Shift+Click to fill</li> -->
+      <!-- <li>Ctrl+V import tikz</li> -->
+      <!-- <li>Add  equattions</li> -->
+    </ul>
+    <div id="color-labels"></div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('graph');
+    const ctx = canvas.getContext('2d');
+    let bounds = {
+      xMin: -3,
+      xMax: 10,
+      yMin: -3,
+      yMax: 43
+    };
+
+    let points = [];
+    let lines = [];
+    let history = [];
+    let isDragging = false;
+    let selectedPoint = null;
+    let currentLine = null;
+    let isShiftPressed = false;
+    let selectedEndpoint = null;
+    let lastMousePos = { x: 0, y: 0 };
+    let isDashedGlobal = false;
+    let penColor = "black"; // Default color
+    let hoverColor = "rgba(255, 255, 0, 0.5)";
+    let forceSave = false;
+
+
+    let labels = []; // Stores general labels
+    let colorLabels = {}; // Stores labels for colors
+
+
+
+    document.getElementById('penColor').addEventListener('change', function (e) {
+      penColor = this.value;
+    });
+
+    document.getElementById('penColor').addEventListener('mousedown', function (e) {
+      if (e.altKey) {
+        // console.log("Alt was pressed during selection");
+        let label = prompt(`Enter a label for the color "${penColor}":`, colorLabels[penColor] || "");
+        if (label !== null && label.trim() !== "") {
+          colorLabels[penColor] = label;
+        } else {
+          delete colorLabels[penColor];
+        }
+        draw();
+      }
+    });
+
+
+
+    document.querySelectorAll("#controls input[type=number]").forEach(input => {
+      input.addEventListener("wheel", function (event) {
+        event.preventDefault(); // Prevent page scroll
+
+        let baseStep = parseFloat(this.step) || 1; // Default step value
+        let value = parseFloat(this.value); // Get the current value
+        let distance = Math.abs(value); // Distance from zero
+
+        // Define a scaling function for step size
+        let scaleFactor = Math.max(0.05, Math.min(0.5, distance * 0.05));
+        let adjustedStep = baseStep * scaleFactor; // Scale the step size
+
+        if (event.deltaY < 0) {
+          this.value = (value + adjustedStep).toFixed(2); // Scroll up increases value
+        } else {
+          this.value = (value - adjustedStep).toFixed(2); // Scroll down decreases value
+        }
+
+        updateBounds(); // Update graph
+      });
+    });
+
+    // Attach event listeners to update bounds dynamically
+    ['xMin', 'xMax', 'yMin', 'yMax'].forEach(id => {
+      let input = document.getElementById(id);
+      input.addEventListener('input', updateBounds);  // Updates as user types
+      input.addEventListener('change', updateBounds);
+    });
+
+    function updateBounds() {
+      bounds.xMin = parseFloat(document.getElementById('xMin').value) || -3;
+      bounds.xMax = parseFloat(document.getElementById('xMax').value) || 10;
+      bounds.yMin = parseFloat(document.getElementById('yMin').value) || -3;
+      bounds.yMax = parseFloat(document.getElementById('yMax').value) || 43;
+      draw();
+    }
+
+
+    function toCanvas({ x, y }) {
+      return { x: toCanvasX(x), y: toCanvasY(y) }
+    }
+
+    function toCanvasX(x) {
+      return (x - bounds.xMin) / (bounds.xMax - bounds.xMin) * canvas.width;
+    }
+
+    function toCanvasY(y) {
+      return canvas.height - (y - bounds.yMin) / (bounds.yMax - bounds.yMin) * canvas.height;
+    }
+
+    function toGraph({ x, y }) {
+      return { x: toGraphX(x), y: toGraphY(y) }
+    }
+
+    function toGraphX(canvasX) {
+      return bounds.xMin + (canvasX / canvas.width) * (bounds.xMax - bounds.xMin);
+    }
+
+    function toGraphY(canvasY) {
+      return bounds.yMin + ((canvas.height - canvasY) / canvas.height) * (bounds.yMax - bounds.yMin);
+    }
+
+    function closestPointOnSegment(px, py, ax, ay, bx, by) {
+      // Find the projection of point (px, py) onto the line segment (ax, ay) - (bx, by)
+      let dx = bx - ax;
+      let dy = by - ay;
+      if (dx === 0 && dy === 0) return { x: ax, y: ay };
+
+      let t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+      t = Math.max(0, Math.min(1, t));
+
+      return { x: ax + t * dx, y: ay + t * dy };
+    }
+
+
+    function calculateStepSize(axisMin, axisMax, A, B, xAxis = true) {
+      let stepGraph = Math.pow(10, Math.floor(Math.log10(axisMax - axisMin)) - 1);
+
+      if (xAxis) {
+        let stepPixels = Math.abs(toCanvasX(stepGraph) - toCanvasX(0));
+        while (stepPixels < A) {
+          stepGraph *= 2;
+          stepPixels = Math.abs(toCanvasX(stepGraph) - toCanvasX(0));
+        }
+        while (stepPixels > B) {
+          stepGraph /= 2;
+          stepPixels = Math.abs(toCanvasX(stepGraph) - toCanvasX(0));
+        }
+      }
+      else {
+        let stepPixels = Math.abs(toCanvasY(stepGraph) - toCanvasY(0));
+        while (stepPixels < A) {
+          stepGraph *= 2;
+          stepPixels = Math.abs(toCanvasY(stepGraph) - toCanvasY(0));
+        }
+        while (stepPixels > B) {
+          stepGraph /= 2;
+          stepPixels = Math.abs(toCanvasY(stepGraph) - toCanvasY(0));
+        }
+      }
+
+      return stepGraph;
+    }
+
+
+
+    function drawGrid() {
+      ctx.strokeStyle = '#eee';
+      ctx.lineWidth = 1;
+      ctx.font = "12px Arial";
+      ctx.fillStyle = "black";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.setLineDash([]);
+
+      // Apply this to X and Y steps:
+      let stepX = calculateStepSize(bounds.xMin, bounds.xMax, 60, 100); // Min 20px, Max 100px
+      let stepY = calculateStepSize(bounds.yMin, bounds.yMax, 20, 100, false); // Min 20px, Max 100px
+
+      // Function to determine decimal places needed
+      function getDecimalPlaces(step) {
+        let decimals = Math.max(0, -Math.floor(Math.log10(step))); // Number of decimals required
+        return Math.min(decimals, 6); // Limit to a maximum of 6 decimal places
+      }
+
+      let decimalPlacesX = getDecimalPlaces(stepX);
+      let decimalPlacesY = getDecimalPlaces(stepY);
+
+      // Align xMin and yMin to the nearest step
+      let startX = Math.floor(bounds.xMin / stepX) * stepX;
+      let startY = Math.floor(bounds.yMin / stepY) * stepY;
+
+      // Draw vertical grid lines with labels on the x-axis
+      for (let x = startX; x <= bounds.xMax; x += stepX) {
+        let canvasX = toCanvasX(x);
+
+        // Grid line
+        ctx.beginPath();
+        ctx.moveTo(canvasX, 0);
+        ctx.lineTo(canvasX, canvas.height);
+        ctx.stroke();
+
+        // X-axis notches and labels
+        if (Math.abs(x) > 1e-10) { // Avoid drawing zero twice
+          ctx.beginPath();
+          ctx.moveTo(canvasX, toCanvasY(0) - 5);
+          ctx.lineTo(canvasX, toCanvasY(0) + 5);
+          ctx.stroke();
+          ctx.fillText(x.toFixed(decimalPlacesX), canvasX, toCanvasY(0) + 15);
+        }
+      }
+
+      // Draw horizontal grid lines with labels on the y-axis
+      for (let y = startY; y <= bounds.yMax; y += stepY) {
+        let canvasY = toCanvasY(y);
+
+        // Grid line
+        ctx.beginPath();
+        ctx.moveTo(0, canvasY);
+        ctx.lineTo(canvas.width, canvasY);
+        ctx.stroke();
+
+        // Y-axis notches and labels
+        if (Math.abs(y) > 1e-10) { // Avoid drawing zero twice
+          ctx.beginPath();
+          ctx.moveTo(toCanvasX(0) - 5, canvasY);
+          ctx.lineTo(toCanvasX(0) + 5, canvasY);
+          ctx.stroke();
+          ctx.fillText(y.toFixed(decimalPlacesY), toCanvasX(0) - 20, canvasY);
+        }
+      }
+
+      // Draw axes
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(toCanvasX(0), 0);
+      ctx.lineTo(toCanvasX(0), canvas.height);
+      ctx.moveTo(0, toCanvasY(0));
+      ctx.lineTo(canvas.width, toCanvasY(0));
+      ctx.stroke();
+
+      // Axis labels
+      ctx.font = "14px Arial";
+      ctx.fillText("X", canvas.width - 15, toCanvasY(0) - 10);
+      ctx.fillText("Y", toCanvasX(0) + 15, 10);
+    }
+
+
+    // Render labels
+    function drawLabels() {
+      ctx.font = "14px Arial";
+      ctx.fillStyle = "black";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+
+      // Draw general labels
+      labels.forEach((label, i) => {
+        const x = toCanvasX(label.x);
+        const y = toCanvasY(label.y);
+        const textWidth = ctx.measureText(label.text).width;
+        const textHeight = 16; // Approximate height, adjust based on font size
+
+        if (hoveredElement.type === 'label' && hoveredElement.index === i) {
+          ctx.fillStyle = hoverColor;
+          ctx.fillRect(x - textWidth / 2 - 4, y - textHeight / 2 - 2, textWidth + 8, textHeight + 4); // Highlight background
+        }
+
+        ctx.fillStyle = "black";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label.text, x, y);
+      });
+
+
+
+      // Draw point labels
+      points.forEach(point => {
+        if (point.label) {
+          ctx.fillText(point.label, toCanvasX(point.x), toCanvasY(point.y) - 10);
+        }
+      });
+
+      // Draw line labels (placed at midpoint)
+      lines.forEach(line => {
+        if (line.label) {
+          let midX = (line.start.x + line.end.x) / 2;
+          let midY = (line.start.y + line.end.y) / 2;
+          ctx.fillText(line.label, toCanvasX(midX), toCanvasY(midY) - 10);
+        }
+      });
+
+      // Make the ttext of div id="color-labels" to be the color labels
+      let colorLabelsDiv = document.getElementById('color-labels');
+      colorLabelsDiv.innerHTML = "";
+      for (let color in colorLabels) {
+        let label = colorLabels[color];
+        let div = document.createElement('div');
+        div.style.color = color;
+        div.textContent = `${color} - [${label}]`;
+        colorLabelsDiv.appendChild(div);
+      }
+
+    }
+
+
+    function drawSmoothLine(points, isDashed = false) {
+      if (points.length < 2) return;
+
+      if (isDashed) {
+        ctx.setLineDash([10, 10]); // Set dashed pattern
+      } else {
+        ctx.setLineDash([]); // Solid line
+      }
+
+      // Ensures smooth line by adding the last point again
+      points = [...points, points[points.length - 1]];
+
+      ctx.beginPath();
+      // Start at the first point
+      ctx.moveTo(toCanvasX(points[0].x), toCanvasY(points[0].y));
+
+      // We'll use a midpoint-based approach for each segment
+      for (let i = 0; i < points.length - 1; i++) {
+        // The midpoint between current point i and the next point i+1
+        const midX = (points[i].x + points[i + 1].x) / 2;
+        const midY = (points[i].y + points[i + 1].y) / 2;
+
+        // Draw a quadratic curve from the last anchor point to the midpoint
+        // with the current point i as the control point
+        ctx.quadraticCurveTo(
+          toCanvasX(points[i].x),   // control point X
+          toCanvasY(points[i].y),   // control point Y
+          toCanvasX(midX),          // end point X
+          toCanvasY(midY)           // end point Y
+        );
+      }
+
+      ctx.stroke();
+    }
+
+    function drawArrow(points, color) {
+      if (points.length < 2) return;
+
+      const arrowSize = 10;
+      let p1, p2;
+
+      // If there are midpoints, take the last midpoint and the end
+      if (points.length > 2) {
+        p1 = points[points.length - 2]; // Second last point (midpoint or start)
+        p2 = points[points.length - 1]; // Last point (end)
+      } else {
+        p1 = points[0]; // Start
+        p2 = points[1]; // End
+      }
+
+      // Convert graph coordinates to canvas coordinates
+      const p1Canvas = toCanvas(p1);
+      const p2Canvas = toCanvas(p2);
+
+      // Account for graph stretching/squashing
+      const scaleX = (bounds.xMax - bounds.xMin) / canvas.width;
+      const scaleY = (bounds.yMax - bounds.yMin) / canvas.height;
+
+      // Compute the tangent direction in graph space
+      const dxGraph = p2.x - p1.x;
+      const dyGraph = p2.y - p1.y;
+
+      // Scale to match the pixel aspect ratio
+      const dxPixel = dxGraph / scaleX;
+      const dyPixel = -dyGraph / scaleY;
+
+      // Compute the correct angle using adjusted pixel coordinates
+      const angle = Math.atan2(dyPixel, dxPixel);
+
+      ctx.save();
+      ctx.translate(p2Canvas.x, p2Canvas.y); // Move to endpoint in canvas space
+      ctx.rotate(angle); // Rotate to match the tangent direction
+
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-arrowSize, -arrowSize / 2);
+      ctx.lineTo(-arrowSize, arrowSize / 2);
+      ctx.closePath();
+
+      ctx.fillStyle = color || "blue";
+      ctx.fill();
+      ctx.restore();
+    }
+
+
+
+    function drawBracket(startX, startY, endX, endY, color, thickness = 2) {
+      const dx = endX - startX;
+      const dy = endY - startY;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      const angle = Math.atan2(dy, dx);
+
+      ctx.setLineDash([])
+      ctx.save();
+      ctx.translate(startX, startY);
+      ctx.rotate(angle);
+
+      ctx.lineWidth = thickness;
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(length, -10);
+      ctx.moveTo(0, -10);
+      ctx.lineTo(0, 0);
+      ctx.moveTo(length, -10);
+      ctx.lineTo(length, 0);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawGrid();
+      drawLabels();
+
+      // Draw points
+      points.forEach((point, i) => {
+        ctx.beginPath();
+        ctx.arc(toCanvasX(point.x), toCanvasY(point.y), 4, 0, 2 * Math.PI);
+        ctx.fillStyle = point.color || "black";
+        ctx.fill();
+
+        if (hoveredElement.index === i && hoveredElement.type === 'point') {
+          ctx.beginPath();
+          ctx.arc(toCanvasX(point.x), toCanvasY(point.y), 16, 0, 2 * Math.PI);
+          ctx.fillStyle = hoverColor;
+          ctx.fill();
+        }
+      });
+
+      // Draw lines
+      lines.forEach((line, i) => {
+        drawLine(line);
+        if (hoveredElement.index === i && hoveredElement.type === 'line') {
+          drawLine(line, true);
+        }
+      });
+
+      // Draw current line if dragging
+      if (isDragging && currentLine) {
+        drawLine(currentLine, false);
+      }
+      ctx.setLineDash([]);
+      // saveState();
+    }
+
+    function drawLine(myLine, highlight = false) {
+      if (highlight) {
+        ctx.lineWidth = 10;
+        ctx.strokeStyle = hoverColor;
+      } else {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = myLine.color;
+      }
+
+      ctx.beginPath();
+      if (myLine.isBracket) {
+        drawBracket(
+          toCanvasX(myLine.start.x),
+          toCanvasY(myLine.start.y),
+          toCanvasX(myLine.end.x),
+          toCanvasY(myLine.end.y)
+        );
+      } else {
+        drawSmoothLine([myLine.start, ...(myLine.midpoints || []), myLine.end], myLine.isDashed);
+      }
+
+      ctx.stroke();
+
+      if (myLine.hasArrowEnd) {
+        drawArrow([myLine.start, ...(myLine.midpoints || []), myLine.end], myLine.color);
+      }
+      if (myLine.hasArrowStart) {
+        drawArrow([myLine.end, ...[...(myLine.midpoints || [])].reverse(), myLine.start], myLine.color);
+      }
+    }
+
+    function getNearestElement(x, y, pixelTolerance = 40) {
+      let nearest = null;
+      let nearestType = null;
+      let minDist = Infinity;
+
+      // Convert pixel tolerance to graph units
+      let graphToleranceX = (bounds.xMax - bounds.xMin) * (pixelTolerance / canvas.width);
+      let graphToleranceY = (bounds.yMax - bounds.yMin) * (pixelTolerance / canvas.height);
+
+      // Check points (measured in pixel space)
+      points.forEach((p, i) => {
+        let canvasP = toCanvas(p);
+        let canvasX = toCanvasX(x);
+        let canvasY = toCanvasY(y);
+        let dist = Math.hypot(canvasP.x - canvasX, canvasP.y - canvasY);
+
+        if (dist < minDist && dist < pixelTolerance) {
+          minDist = dist;
+          nearest = i;
+          nearestType = 'point';
+        }
+      });
+
+      // Check lines
+      lines.forEach((line, i) => {
+        let dist = nearSmoothLine([line.start, ...(line.midpoints || []), line.end], x, y, pixelTolerance);
+        if (dist < minDist && dist < pixelTolerance) {
+          minDist = dist;
+          nearest = i;
+          nearestType = 'line';
+        }
+      });
+
+      // Check labels
+      labels.forEach((label, i) => {
+        let canvasLabel = toCanvas(label);
+        let canvasX = toCanvasX(x);
+        let canvasY = toCanvasY(y);
+        let dist = Math.hypot(canvasLabel.x - canvasX, canvasLabel.y - canvasY);
+
+        if (dist < minDist && dist < pixelTolerance) {
+          minDist = dist;
+          nearest = i;
+          nearestType = 'label';
+        }
+      });
+
+      // if (minDist < Infinity) {
+      //   console.log(`\nNearest element is ${nearestType} at index ${nearest}
+      //   Label: ${nearestType === 'label' ? labels[nearest].text : nearestType === 'point' ? points[nearest].label : lines[nearest].label}
+      //   Color: ${nearestType === 'line' ? lines[nearest].color : nearestType === 'point' ? points[nearest].color : ''}`);
+      // }
+
+      // console.log(`Cursor is ${minDist == Infinity ? "far from anything" : "exactly " + minDist.toFixed(1) + "px" + ` the ${nearestType} at index ${nearest}`}`);
+
+      return { index: nearest, type: nearestType };
+    }
+
+
+    function nearSmoothLine(points, mouseXgraphCoord, mouseYgraphCoord, tolerance) {
+      if (points.length < 2) return;
+
+      // Ensure smooth line by duplicating the last point
+      let adjustedPoints = [...points, points[points.length - 1]];
+
+      // Create an off-screen canvas for hit detection
+      let hitTestCanvas = document.createElement("canvas");
+      hitTestCanvas.width = canvas.width;
+      hitTestCanvas.height = canvas.height;
+      let hitCtx = hitTestCanvas.getContext("2d");
+
+      // Convert mouse coordinates to canvas space
+      let mouseCanvasX = toCanvasX(mouseXgraphCoord);
+      let mouseCanvasY = toCanvasY(mouseYgraphCoord);
+
+      // Function to check if the mouse is within stroke
+      function isMouseNear(testTolerance) {
+        hitCtx.clearRect(0, 0, hitTestCanvas.width, hitTestCanvas.height);
+        hitCtx.lineWidth = testTolerance * 2; // Adjusted for detection
+        hitCtx.strokeStyle = "rgba(0,0,0,0.2)";
+        hitCtx.setLineDash(ctx.getLineDash());
+
+        hitCtx.beginPath();
+        hitCtx.moveTo(toCanvasX(adjustedPoints[0].x), toCanvasY(adjustedPoints[0].y));
+
+        for (let i = 0; i < adjustedPoints.length - 1; i++) {
+          let midX = (adjustedPoints[i].x + adjustedPoints[i + 1].x) / 2;
+          let midY = (adjustedPoints[i].y + adjustedPoints[i + 1].y) / 2;
+
+          hitCtx.quadraticCurveTo(
+            toCanvasX(adjustedPoints[i].x),
+            toCanvasY(adjustedPoints[i].y),
+            toCanvasX(midX),
+            toCanvasY(midY)
+          );
+        }
+
+        hitCtx.stroke();
+        return hitCtx.isPointInStroke(mouseCanvasX, mouseCanvasY);
+      }
+
+      // Perform binary search to find the exact pixel distance
+      let minTol = 0, maxTol = tolerance, exactDistance = tolerance;
+      if (isMouseNear(maxTol)) {
+        while (maxTol - minTol > 0.5) { // Precision to 0.5 pixels
+          let midTol = (minTol + maxTol) / 2;
+          if (isMouseNear(midTol)) {
+            exactDistance = midTol;
+            maxTol = midTol; // Reduce tolerance
+          } else {
+            minTol = midTol; // Increase lower bound
+          }
+        }
+      }
+
+      return exactDistance < tolerance ? exactDistance : Infinity
+    }
+
+
+
+    function addLabelHere(e) {
+      if (!e.altKey) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const clickX = toGraphX(e.clientX - rect.left);
+      const clickY = toGraphY(e.clientY - rect.top);
+
+
+      function addLabel(x, y, text) {
+        labels.push({ x, y, text });
+        draw();
+      }
+
+      function labelColor(color) {
+        let label = prompt(`Enter a label for color ${color}:`);
+        if (label !== null) {
+          colorLabels[color] = label;
+        }
+        draw();
+      }
+
+      // Check if clicked on a color in selector
+      let colorSelector = document.getElementById('penColor');
+      let colorBounds = colorSelector.getBoundingClientRect();
+      // console.log(colorBounds);
+      if (
+        e.clientX >= colorBounds.left &&
+        e.clientX <= colorBounds.right &&
+        e.clientY >= colorBounds.top &&
+        e.clientY <= colorBounds.bottom
+      ) {
+        labelColor(colorSelector.value);
+        return;
+      }
+
+      // Check for nearest point or line
+      if (hoveredElement.type === 'point') {
+        let point = points[hoveredElement.index];
+        let label = prompt("Enter label for this point:", point.label || "");
+        if (label) {
+          point.label = label;
+        } else {
+          delete point.label;
+        }
+      } else if (hoveredElement.type === 'line') {
+        let line = lines[hoveredElement.index];
+        let label = prompt("Enter label for this line:", line.label || "");
+        if (label) {
+          line.label = label;
+        } else {
+          delete line.label;
+        }
+      } else if (hoveredElement.type == 'label') {
+        // Add a general label
+        let oldlabel = labels[hoveredElement.index];
+        let label = prompt("Edit label:", oldlabel.text || "");
+        if (label) {
+          oldlabel.text = label;
+        } else {
+          labels.splice(hoveredElement.index, 1);
+        }
+      } else {
+        // Add a general label
+        let label = prompt("Enter label:", "");
+        if (label) {
+          addLabel(clickX, clickY, label);
+        } else {
+          delete line.label;
+        }
+      }
+
+      draw();
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+      if (e.ctrlKey) {
+        deleteHoveredElement();
+      } else {
+        isDragging = true;
+        currentLine = {
+          start: { ...lastMousePos },
+          midpoints: [],
+          end: { ...lastMousePos },
+          isBracket: e.altKey ? true : false,
+          hasArrowStart: false,
+          hasArrowEnd: false,
+          isDashed: isDashedGlobal,
+          color: penColor
+        };
+      }
+    });
+
+    function deleteHoveredElement() {
+      if (!isDragging && hoveredElement && hoveredElement.index !== null) {
+        if (hoveredElement.type === 'point') {
+          points.splice(hoveredElement.index, 1); // Remove point
+        } else if (hoveredElement.type === 'line') {
+          lines.splice(hoveredElement.index, 1); // Remove line
+        } else if (hoveredElement.type === 'label') {
+          labels.splice(hoveredElement.index, 1); // Remove label
+        }
+      }
+      draw();
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      lastMousePos.x = toGraphX(e.clientX - rect.left);
+      lastMousePos.y = toGraphY(e.clientY - rect.top);
+
+      hoveredElement = getNearestElement(lastMousePos.x, lastMousePos.y, 15);
+
+      if (isDragging && currentLine) {
+        currentLine.end.x = lastMousePos.x;
+        currentLine.end.y = lastMousePos.y;
+      }
+
+      draw();
+    });
+
+    canvas.addEventListener('mouseup', (e) => {
+      if (!currentLine) return; // Prevents errors if currentLine is null
+
+      hoveredElement = getNearestElement(lastMousePos.x, lastMousePos.y, 15);
+
+      // Compute the max Euclidean distance between any two points on the line
+      let allPoints = [currentLine.start, ...(currentLine.midpoints || []), currentLine.end];
+      let currentLineLength = 0; // Initialize max distance
+      for (let i = 0; i < allPoints.length; i++) {
+        for (let j = i + 1; j < allPoints.length; j++) {
+          let dx = toCanvasX(allPoints[j].x) - toCanvasX(allPoints[i].x);
+          let dy = toCanvasY(allPoints[j].y) - toCanvasY(allPoints[i].y);
+          let dist = Math.sqrt(dx * dx + dy * dy);
+          currentLineLength = Math.max(currentLineLength, dist);
+        }
+      }
+
+      if (currentLineLength > 30) {
+        if (!currentLine.midpoints) currentLine.midpoints = [];
+        lines.push(currentLine);
+      } else if (currentLineLength === 0 && e.button === 0 && !e.altKey) {
+        points.push({ ...currentLine.start, color: penColor });
+      } else if (currentLineLength === 0 && e.button === 0 && e.altKey) {
+        addLabelHere(e);
+      }
+
+      isDragging = false;
+      currentLine = null;
+      saveState();
+      draw();
+    });
+
+
+    document.addEventListener('keydown', (e) => {
+      // If user is typing in an <input> or <textarea>, allow normal behavior:
+      if (e.target.tagName.toLowerCase() === 'input' ||
+        e.target.tagName.toLowerCase() === 'textarea') {
+        return; // Don’t preventDefault(), don’t do your custom logic
+      }
+
+      if (e.ctrlKey && e.key === 'c') {
+        e.preventDefault();  // Prevent the browser's default copy action.
+        exportTikz();        // Call your export function.
+        return;              // Exit so no other Ctrl+C logic is processed.
+      }
+
+
+      if (e.ctrlKey && e.key === 'x') {
+        isDashedGlobal = !isDashedGlobal; // Toggle global dashed state
+        if (currentLine) {
+          currentLine.isDashed = isDashedGlobal; // Apply to current line if drawing
+        }
+        // console.log(isDashedGlobal);
+      }
+
+      // Update midpoints when Shift is pressed
+      if (e.shiftKey && currentLine) {
+        if (!currentLine.midpoints) { currentLine.midpoints = []; }
+        currentLine.midpoints.push({ ...lastMousePos });
+      }
+
+      canvas.style.cursor = "crosshair";
+
+
+      // Bracket line
+      if (e.altKey) {
+        if (currentLine) { currentLine.isBracket = true; }
+      }
+
+      // // Ctrl + Z
+      // if (e.ctrlKey && e.key === 'z') {
+      //   if (history.length > 0) {
+      //     // console.log("History", history.length);
+      //     history.pop();
+
+      //     if (history.length > 0) {
+      //       points = history[history.length - 1].points || [];
+      //       lines = history[history.length - 1].lines || [];
+      //       labels = history[history.length - 1].labels || [];
+      //     } else {
+      //       points = [];
+      //       lines = [];
+      //       labels = [];
+      //     }
+
+      //     // Force a save on the next state change even if it appears identical.
+      //     forceSave = true;
+
+      //     console.log(`Undo performed. New history length: ${history.length}`);
+      //     draw();
+      //     e.preventDefault();
+      //     return;
+      //   }
+      // }
+
+
+      draw();
+      saveState();
+      e.preventDefault();
+    });
+
+    document.addEventListener('keyup', (e) => {
+      if (e.key == 'Alt') {
+        if (currentLine) { currentLine.isBracket = false; }
+      }
+      draw();
+    });
+
+    function saveState() {
+      return;
+
+      // If a force-save is requested (after an undo), push the state unconditionally.
+      if (forceSave) {
+        history.push({
+          points: JSON.parse(JSON.stringify(points)),
+          lines: JSON.parse(JSON.stringify(lines)),
+          labels: JSON.parse(JSON.stringify(labels))
+        });
+        forceSave = false;
+        console.log("Forced state save; history length now:", history.length);
+        return;
+      }
+
+      // Otherwise, only save if there is a difference.
+      if (history.length > 0) {
+        const lastState = history[history.length - 1];
+        if (
+          JSON.stringify(lastState.points) === JSON.stringify(points) &&
+          JSON.stringify(lastState.lines) === JSON.stringify(lines) &&
+          JSON.stringify(lastState.labels) === JSON.stringify(labels)
+        ) {
+          console.log("No change; state not saved.");
+          return; // Skip saving if no changes were made.
+        }
+      }
+
+      history.push({
+        points: JSON.parse(JSON.stringify(points)),
+        lines: JSON.parse(JSON.stringify(lines)),
+        labels: JSON.parse(JSON.stringify(labels))
+      });
+
+      console.log("State saved; history length now:", history.length);
+
+      // if (history.length > 0) {
+      //   let lastState = { points: history[history.length - 1].points || [], lines: history[history.length - 1].lines || [], labels: history[history.length - 1].labels || [] };
+      //   console.log(`Saved state:\nHistory Length: ${history.length}\nLines: ${lastState.lines.length}\nPoints: ${lastState.points.length}\nLabels: ${lastState.labels.length}`);
+      // } else {
+      //   console.log("No history saved");
+      // }
+    }
+
+
+    canvas.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+
+      const rect = canvas.getBoundingClientRect();
+      const clickX = toGraphX(e.clientX - rect.left);
+      const clickY = toGraphY(e.clientY - rect.top);
+
+      // Find the closest endpoint
+      for (let line of lines) {
+        const endPixel = { x: toCanvasX(line.end.x), y: toCanvasY(line.end.y) };
+        const startPixel = { x: toCanvasX(line.start.x), y: toCanvasY(line.start.y) };
+        const clickPixel = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+
+        const distEnd = Math.hypot(endPixel.x - clickPixel.x, endPixel.y - clickPixel.y);
+        if (distEnd < 20) {
+          line.hasArrowEnd = !line.hasArrowEnd; // Toggle arrow at end
+          draw();
+          return;
+        }
+
+        const distStart = Math.hypot(startPixel.x - clickPixel.x, startPixel.y - clickPixel.y);
+        if (distStart < 20) {
+          line.hasArrowStart = !line.hasArrowStart; // Toggle arrow at start
+          draw();
+          return;
+        }
+      }
+    });
+
+    function exportTikz() {
+      const tikzWidth = 5;   // 5in (we only need the ratio)
+      const tikzHeight = 3;  // 3in (we only need the ratio)
+
+      let tikzCode = "";
+      tikzCode += "\\begin{center}\n";
+      tikzCode += "  \\begin{tikzpicture}\n";
+      tikzCode += "    \\begin{axis}[\n";
+      tikzCode += "        axis lines = middle,\n";
+      tikzCode += "        xlabel = $x$,\n";
+      tikzCode += "        ylabel = $y$,\n";
+      tikzCode += "        grid = both,\n";
+      tikzCode += "        minor tick num = 1,\n";
+      tikzCode += "        width=" + tikzWidth + "in, height=" + tikzHeight + "in,\n";
+      tikzCode += "        xmin=" + bounds.xMin + ", xmax=" + bounds.xMax + ",\n";
+      tikzCode += "        ymin=" + bounds.yMin + ", ymax=" + bounds.yMax + ",\n";
+      tikzCode += "        legend pos=north west,\n";
+      tikzCode += "      ]\n";
+
+      let tikzColor = "";
+
+      Object.entries(colorLabels).forEach(([color, label]) => {
+        tikzColor = color ? `color=${color === "green" ? "green!50!black" : color}` : "color=black";
+        tikzCode += `      \\addlegendimage{${tikzColor}, only marks}\n`;
+        tikzCode += `      \\addlegendentry{${label}}\n`;
+      });
+
+      // tikzCode += "\n";
+
+      // Process each drawn line
+      lines.forEach(line => {
+        tikzColor = line.color ? `color=${line.color === "green" ? "green!50!black" : line.color}` : "color=black";
+
+        // Determine arrow options.
+        let arrowOption = "";
+        if (line.hasArrowStart && line.hasArrowEnd) {
+          arrowOption = "<->";
+        } else if (line.hasArrowStart) {
+          arrowOption = "<-";
+        } else if (line.hasArrowEnd) {
+          arrowOption = "->";
+        }
+        // Use dashed or solid style.
+        let styleOption = line.isDashed ? "dashed" : "solid";
+
+        if (line.isBracket) {
+          // For brackets, draw only between the start and end points.
+          tikzCode += "      \\draw[decorate,decoration={brace,amplitude=6pt}, " + tikzColor;
+          if (arrowOption !== "") {
+            tikzCode += ", " + arrowOption;
+          }
+          tikzCode += ", solid, very thick] (" + line.start.x + "," + line.start.y + ") -- (" + line.end.x + "," + line.end.y + ");\n";
+
+          // If a label is provided, compute the angle and place a node along the bracket.
+          if (line.label) {
+            // Compute data ranges from bounds:
+            let xRange = bounds.xMax - bounds.xMin;
+            let yRange = bounds.yMax - bounds.yMin;
+            // Compute scaling factors
+            let scaleX = tikzWidth / xRange;
+            let scaleY = tikzHeight / yRange;
+            // Compute differences in graph coordinates:
+            let dx = line.end.x - line.start.x;
+            let dy = line.end.y - line.start.y;
+            // Compute effective differences:
+            let effectiveDx = dx * scaleX;
+            let effectiveDy = dy * scaleY;
+            // Now compute the angle in degrees:
+            let angle = Math.atan2(effectiveDy, effectiveDx) * 180 / Math.PI;
+            // Place the label at the midpoint along the bracket:
+            tikzCode += "      \\node[rotate=" + angle.toFixed(2) + ", " + tikzColor + ", above=5pt] at ($(" + line.start.x + "," + line.start.y + ")!0.5!(" + line.end.x + "," + line.end.y + ")$) {" + line.label + "};\n";
+          }
+        } else {
+          // For normal lines, use the quadratic smoothing (with all points)
+          let pts = [line.start].concat(line.midpoints || [], [line.end]);
+          let path = getTikzQuadraticPath(pts);
+
+          tikzCode += "      \\draw[" + tikzColor + ", " + styleOption;
+          if (arrowOption !== "") {
+            tikzCode += ", " + arrowOption;
+          }
+          tikzCode += ", very thick] " + path + ";\n";
+
+          if (line.label) {
+            // This simplistic approach places the label at the last computed endpoint.
+            tikzCode += "      \\node[" + tikzColor + ", right] at (" + line.end.x + "," + line.end.y + ") {" + line.label + "};\n";
+          }
+        }
+      });
+
+      // tikzCode += "\n";
+
+      // (Optional) Export the individual points.
+      points.forEach(point => {
+        tikzColor = point.color ? `color=${point.color === "green" ? "green!50!black" : point.color}` : "color=black";
+        tikzCode += "      \\addplot[" + tikzColor + ", only marks, mark=*] coordinates {(" + point.x + "," + point.y + ")};\n";
+        if (point.label) {
+          tikzCode += "      \\node[" + tikzColor + ", above] at (" + point.x + "," + point.y + ") {" + point.label + "};\n";
+        }
+      });
+
+      labels.forEach(label => {
+        tikzCode += "      \\node at (" + label.x + "," + label.y + ") {\\textbf{" + label.text + "}};\n";
+      });
+
+      tikzCode += "    \\end{axis}\n";
+      tikzCode += "  \\end{tikzpicture}\n";
+      tikzCode += "\\end{center}\n";
+
+      // Copy the generated code to the clipboard.
+      navigator.clipboard.writeText(tikzCode)
+        .then(() => {
+          alert("TikZ code copied to clipboard!");
+        })
+        .catch(err => {
+          alert("Error copying text: " + err);
+        });
+    }
+
+
+    function getTikzQuadraticPath(pointsArray, controlStrength = 0.7) {
+      // Duplicate the last point (as in your drawSmoothLine function)
+      let pts = pointsArray.slice();
+      pts.push(pointsArray[pointsArray.length - 1]);
+
+      let path = "";
+      // Start at the first point
+      let S = { x: pts[0].x, y: pts[0].y };
+      path += "(" + S.x + "," + S.y + ")";
+
+      // For each segment, compute the endpoint as the midpoint between the current and next points.
+      // Then adjust the control point from the original value toward the straight-line control.
+      for (let i = 0; i < pts.length - 1; i++) {
+        // The original control point for this segment:
+        let C = pts[i];
+        // The next point:
+        let next = pts[i + 1];
+        // The endpoint is the midpoint between the current point and the next point:
+        let E = {
+          x: (C.x + next.x) / 2,
+          y: (C.y + next.y) / 2
+        };
+        // The "straight-line" control point would be halfway between the segment start S and endpoint E:
+        let C_line = {
+          x: (S.x + E.x) / 2,
+          y: (S.y + E.y) / 2
+        };
+        // Interpolate between the original control (C) and the straight-line control (C_line)
+        let C_adj = {
+          x: controlStrength * C.x + (1 - controlStrength) * C_line.x,
+          y: controlStrength * C.y + (1 - controlStrength) * C_line.y
+        };
+        // Append the quadratic Bézier segment in TikZ syntax:
+        // (current point) .. controls (adjusted control) .. (endpoint)
+        path += " .. controls (" + C_adj.x + "," + C_adj.y + ") .. (" + E.x + "," + E.y + ")";
+        // Update the start of the next segment:
+        S = E;
+      }
+      return path;
+    }
+
+
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth - 40;  // Full screen width
+      draw();  // Redraw everything after resizing
+    }
+
+    // Resize canvas when the window loads or resizes
+    window.addEventListener("load", resizeCanvas);
+    window.addEventListener("resize", resizeCanvas);
+
+    // Initial draw
+    draw();
+  </script>
+</body>
+
+</html>
