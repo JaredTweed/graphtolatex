@@ -74,6 +74,7 @@
       <span id="edge-color-indicator"
         style="display: inline-block; width: 10px; height: 10px; margin-left: 8px; border-radius: 50%; background-color: black; border: 1px solid black;"></span>
     </p>
+    <p>Ctrl + Alt + Click: Change node/edge color</p>
     <div id="node-colors"></div>
     <div id="edge-colors"></div>
     <!-- </ul> -->
@@ -191,8 +192,8 @@
         e.preventDefault(); // Prevent the default copy
         const tikzCode = buildTikzCode();
         navigator.clipboard.writeText(tikzCode)
-          .then(() => console.log("Copied TikZ code to clipboard:\n", tikzCode))
-          .catch(err => console.error("Failed to copy:", err));
+          .then(() => alert("Copied TikZ code to clipboard!"))
+          .catch(err => alert("Failed to copy: " + err));
       } else if (e.ctrlKey && e.key.toLowerCase() === 'v') {
         e.preventDefault(); // Prevent default paste action
         try {
@@ -259,6 +260,18 @@
 
       if (e.ctrlKey) {
         // Remove node and its edges
+        if (e.altKey) {
+          if (node) {
+            node.color = nodeColors[currentNodeColorIndex];
+            return;
+          }
+          if (edge) {
+            edge.color = edgeColors[currentEdgeColorIndex];
+            return;
+          }
+          return;
+        }
+
         if (node) {
           const connectedEdges = edges.filter(edge => edge.from === node || edge.to === node);
           actions.push({ type: 'deleteNode', node, connectedEdges });
@@ -877,7 +890,7 @@
         const tikzX = node.x - minX;
         const tikzY = node.y - minY;
 
-        code += `  \\node[main node, fill=${fillColorTikz}] (${nodeId}) at (${tikzX}, ${tikzY}) {${nodeLabel}};\n`;
+        code += `  \\node[main node, fill=${fillColorTikz}${fillColorTikz == 'black' ? ', text=white' : ''}] (${nodeId}) at (${tikzX}, ${tikzY}) {${nodeLabel}};\n`;
       });
 
       // 7) Edges
@@ -975,6 +988,8 @@
           l = 0.45;
         }
       } else {
+        // console.log(r, g, b);
+        if (r < 0.05 && g < 0.05 && b < 0.05) { return 'black'; }
         if (l < 0.67) {
           l = 0.67;
         }
